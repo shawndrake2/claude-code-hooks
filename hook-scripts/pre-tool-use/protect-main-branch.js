@@ -19,11 +19,17 @@ const { execFileSync } = require('child_process');
 const PROTECTED_BRANCHES = ['main', 'master'];
 
 const PATTERNS = [
-    { id: 'push-main',         regex: /\bgit\s+push\b.*\bmain\b/,                     reason: 'Pushing to main is not allowed' },
-    { id: 'push-master',       regex: /\bgit\s+push\b.*\bmaster\b/,                   reason: 'Pushing to master is not allowed' },
-    { id: 'force-push',        regex: /\bgit\s+push\b.*(?:--force|-f)\b/,             reason: 'Force-pushing is not allowed' },
-    { id: 'commit-on-protected', regex: /\bgit\s+commit\b/,                           reason: 'Committing directly on {branch} is not allowed', branchOnly: true },
-    { id: 'gh-pr-merge',       regex: /\bgh\s+pr\s+merge\b/,                          reason: 'Merging PRs via gh CLI is not allowed' },
+    // Block dangerous push variants regardless of branch
+    { id: 'force-push',          regex: /\bgit\s+push\b.*(?:--force|-f)\b/,            reason: 'Force-pushing is not allowed' },
+    { id: 'push-main',           regex: /\bgit\s+push\b.*\bmain\b/,                    reason: 'Pushing to main is not allowed' },
+    { id: 'push-master',         regex: /\bgit\s+push\b.*\bmaster\b/,                  reason: 'Pushing to master is not allowed' },
+
+    // Block direct changes when on a protected branch
+    { id: 'commit-on-protected', regex: /\bgit\s+commit\b/,                            reason: 'Committing directly on {branch} is not allowed', branchOnly: true },
+    { id: 'push-on-protected',   regex: /\bgit\s+push\b/,                              reason: 'Pushing from {branch} is not allowed', branchOnly: true },
+
+    // Block merging PRs directly
+    { id: 'gh-pr-merge',         regex: /\bgh\s+pr\s+merge\b/,                         reason: 'Merging PRs via gh CLI is not allowed' },
 ];
 
 function getCurrentBranch() {
@@ -32,6 +38,22 @@ function getCurrentBranch() {
     } catch {
         return '';
     }
+}
+
+function checkCommand(cmd, branch = null) {
+    for (const p of PATTERNS) {
+        if (!p.regex.test(cmd)) continue;
+
+        if (p.branchOnly) {
+            if (!branch) branch = getCurrentBranch();
+            if (!PROTECTED_BRANCHES.includes(branch)) continue;
+        }
+
+        const reason = p.reason.replace('{branch}', branch || '');
+        return { blocked: true, pattern: p, reason };
+    }
+
+    return { blocked: false };
 }
 
 async function main() {
@@ -43,22 +65,14 @@ async function main() {
         if (data.tool_name !== 'Bash') return console.log('{}');
 
         const cmd = data.tool_input?.command || '';
-        let branch = null;
+        const result = checkCommand(cmd);
 
-        for (const p of PATTERNS) {
-            if (!p.regex.test(cmd)) continue;
-
-            if (p.branchOnly) {
-                if (!branch) branch = getCurrentBranch();
-                if (!PROTECTED_BRANCHES.includes(branch)) continue;
-            }
-
-            const reason = p.reason.replace('{branch}', branch || '');
+        if (result.blocked) {
             return console.log(JSON.stringify({
                 hookSpecificOutput: {
                     hookEventName: 'PreToolUse',
                     permissionDecision: 'deny',
-                    permissionDecisionReason: `⛔ [${p.id}] ${reason}`
+                    permissionDecisionReason: `⛔ [${result.pattern.id}] ${result.reason}`
                 }
             }));
         }
@@ -69,4 +83,8 @@ async function main() {
     }
 }
 
-main();
+if (require.main === module) {
+    main();
+} else {
+    module.exports = { PATTERNS, PROTECTED_BRANCHES, checkCommand };
+}
