@@ -8,7 +8,7 @@
  *   "hooks": {
  *     "PreToolUse": [{
  *       "matcher": "Bash",
- *       "hooks": [{ "type": "command", "command": "node ~/.claude/hooks/branch-protection.js" }]
+ *       "hooks": [{ "type": "command", "command": "node ~/.claude/hooks/protect-main-branch.js" }]
  *     }]
  *   }
  * }
