@@ -8,7 +8,7 @@
  *   "hooks": {
  *     "PreToolUse": [{
  *       "matcher": "Bash",
- *       "hooks": [{ "type": "command", "command": "node ~/.claude/hooks/git-safety.js" }]
+ *       "hooks": [{ "type": "command", "command": "node /path/to/git-safety.js" }]
  *     }]
  *   }
  * }
