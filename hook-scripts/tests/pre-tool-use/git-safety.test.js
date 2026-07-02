@@ -11,7 +11,7 @@ const assert = require('node:assert');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 
-const { PATTERNS, PROTECTED_BRANCHES, checkCommand } = require('../../pre-tool-use/git-safety.js');
+const { PATTERNS, PROTECTED_BRANCHES, LEVELS, checkCommand } = require('../../pre-tool-use/git-safety.js');
 
 const SCRIPT_PATH = path.join(__dirname, '../../pre-tool-use/git-safety.js');
 
@@ -19,22 +19,22 @@ const SCRIPT_PATH = path.join(__dirname, '../../pre-tool-use/git-safety.js');
 // Test helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-function shouldBlock(cmd, expectedId = null, branch = null) {
-  const result = checkCommand(cmd, branch);
+function shouldBlock(cmd, expectedId = null, branch = null, level = undefined) {
+  const result = checkCommand(cmd, branch, level);
   assert.strictEqual(result.blocked, true, `Expected BLOCKED but was ALLOWED: ${cmd}`);
   if (expectedId) {
     assert.strictEqual(result.pattern.id, expectedId, `Expected pattern '${expectedId}' but got '${result.pattern.id}'`);
   }
 }
 
-function shouldAllow(cmd, branch = null) {
-  const result = checkCommand(cmd, branch);
+function shouldAllow(cmd, branch = null, level = undefined) {
+  const result = checkCommand(cmd, branch, level);
   assert.strictEqual(result.blocked, false, `Expected ALLOWED but was BLOCKED by '${result.pattern?.id}': ${cmd}`);
 }
 
-function runHook(command) {
+function runHook(command, env = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn('node', [SCRIPT_PATH]);
+    const child = spawn('node', [SCRIPT_PATH], { env: { ...process.env, ...env } });
     let stdout = '';
     let stderr = '';
 
@@ -68,15 +68,20 @@ function runHook(command) {
 
 describe('Unit: checkCommand()', () => {
 
-  // ── Dangerous pushes (always blocked) ──────────────────────────────────
+  // ── Force push ─────────────────────────────────────────────────────────
+  // At the default 'standard' level, plain force-push is delegated to
+  // block-dangerous-commands.js (no overlap). It is only blocked here at 'strict'.
 
-  describe('Force push (always blocked)', () => {
-    it('blocks git push --force', () => shouldBlock('git push --force origin feature', 'force-push'));
-    it('blocks git push -f', () => shouldBlock('git push -f origin feature', 'force-push'));
-    it('blocks git push --force to main', () => shouldBlock('git push --force origin main', 'force-push'));
-    it('blocks git push --force to master', () => shouldBlock('git push --force origin master', 'force-push'));
-    it('blocks force push with extra args', () => shouldBlock('git push --force origin feature --no-verify', 'force-push'));
-    it('allows git push --force-with-lease', () => shouldAllow('git push --force-with-lease origin feature', 'feature-branch'));
+  describe('Force push', () => {
+    it('allows plain force push at standard (delegated to sibling hook)', () => shouldAllow('git push --force origin feature', 'feature-branch'));
+    it('allows git push -f at standard (delegated to sibling hook)', () => shouldAllow('git push -f origin feature', 'feature-branch'));
+    it('still blocks force push to main at standard (via push-main)', () => shouldBlock('git push --force origin main', 'push-main'));
+    it('still blocks force push to master at standard (via push-master)', () => shouldBlock('git push --force origin master', 'push-master'));
+
+    it('blocks git push --force at strict', () => shouldBlock('git push --force origin feature', 'force-push', 'feature-branch', 'strict'));
+    it('blocks git push -f at strict', () => shouldBlock('git push -f origin feature', 'force-push', 'feature-branch', 'strict'));
+    it('blocks force push with extra args at strict', () => shouldBlock('git push --force origin feature --no-verify', 'force-push', 'feature-branch', 'strict'));
+    it('allows git push --force-with-lease at strict', () => shouldAllow('git push --force-with-lease origin feature', 'feature-branch', 'strict'));
   });
 
   describe('Push to main/master (always blocked)', () => {
@@ -246,6 +251,18 @@ describe('Unit: checkCommand()', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SAFETY_LEVEL tiers
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('SAFETY_LEVEL tiers', () => {
+  it('standard delegates plain force-push to the sibling hook (allowed)', () => shouldAllow('git push --force origin feature', 'feature-branch', 'standard'));
+  it('strict blocks plain force-push (self-sufficient)', () => shouldBlock('git push --force origin feature', 'force-push', 'feature-branch', 'strict'));
+  it('standard still blocks the complementary coverage (gh pr merge)', () => shouldBlock('gh pr merge 1', 'gh-pr-merge', null, 'standard'));
+  it('strict still blocks the complementary coverage (gh pr merge)', () => shouldBlock('gh pr merge 1', 'gh-pr-merge', null, 'strict'));
+  it('unknown level falls back to standard behavior', () => shouldAllow('git push --force origin feature', 'feature-branch', 'bogus'));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Integration Tests - actual stdin/stdout flow
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -257,8 +274,14 @@ describe('Integration: stdin/stdout hook flow', () => {
     assert.ok(output.hookSpecificOutput?.permissionDecisionReason.includes('push-main'));
   });
 
-  it('returns deny for force push', async () => {
+  it('allows plain force push at default (standard) level', async () => {
     const { code, output } = await runHook('git push --force origin feature');
+    assert.strictEqual(code, 0);
+    assert.deepStrictEqual(output, {});
+  });
+
+  it('returns deny for force push when GIT_SAFETY_LEVEL=strict', async () => {
+    const { code, output } = await runHook('git push --force origin feature', { GIT_SAFETY_LEVEL: 'strict' });
     assert.strictEqual(code, 0);
     assert.strictEqual(output.hookSpecificOutput?.permissionDecision, 'deny');
     assert.ok(output.hookSpecificOutput?.permissionDecisionReason.includes('force-push'));
@@ -357,6 +380,12 @@ describe('Config: PATTERNS structure', () => {
     for (const p of PATTERNS) {
       assert.ok(p.regex instanceof RegExp, `Pattern ${p.id} missing regex`);
       assert.ok(typeof p.reason === 'string' && p.reason.length > 0, `Pattern ${p.id} missing reason`);
+    }
+  });
+
+  it('has a valid level for each pattern', () => {
+    for (const p of PATTERNS) {
+      assert.ok(LEVELS[p.level], `Pattern ${p.id} has invalid level: ${p.level}`);
     }
   });
 
