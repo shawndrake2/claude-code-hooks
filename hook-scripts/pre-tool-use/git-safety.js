@@ -3,19 +3,18 @@
  * Git Safety - PreToolUse Hook for Bash
  * Blocks destructive git and gh CLI operations. Logs to: ~/.claude/hooks-logs/
  *
+ * SAFETY_LEVEL: 'critical' | 'high' | 'strict'
+ *   critical - no git-safety rules apply (defer entirely to block-dangerous-commands.js)
+ *   high     - branch-aware guardrails (commit/merge/rebase/reset/push while on a
+ *              protected branch), protected-branch deletion, direct pushes to
+ *              main/master by name, and destructive gh CLI operations
+ *   strict   - + force-push, so this hook is self-sufficient standalone
+ *
  * Composition with block-dangerous-commands.js:
  *   That hook already blocks force-push (any, and to main/master) and
- *   `git reset --hard` on any branch. This hook is complementary and focuses on
- *   coverage the sibling hook lacks: branch-context awareness (blocking
- *   commit/merge/rebase/reset/push while checked out on a protected branch),
- *   protected-branch deletion, direct pushes to main/master by name, and
- *   destructive `gh` CLI operations. Run both together for full coverage.
- *
- * GIT_SAFETY_LEVEL: 'standard' (default) | 'strict'
- *   standard - complementary coverage only; assumes block-dangerous-commands.js
- *              handles force-push, so there is no overlap between the two hooks.
- *   strict   - additionally blocks force-push, so this hook is self-sufficient
- *              when used WITHOUT block-dangerous-commands.js.
+ *   `git reset --hard` on any branch. At the default 'high' level this hook adds
+ *   only the complementary coverage above, so the two do not overlap. Raise this
+ *   hook to 'strict' (or lower the sibling out) if you run git-safety on its own.
  *
  * Setup in .claude/settings.json:
  * {
@@ -32,38 +31,41 @@ const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const SAFETY_LEVEL = process.env.GIT_SAFETY_LEVEL || 'standard';
-const LEVELS = { standard: 1, strict: 2 };
-const LOG_DIR = path.join(process.env.HOME || '', '.claude', 'hooks-logs');
+const SAFETY_LEVEL = 'high';
 
 const PROTECTED_BRANCHES = ['main', 'master'];
 
 const PATTERNS = [
-    // strict-only: force-push is normally handled by block-dangerous-commands.js.
-    // Re-added at the 'strict' level so git-safety is self-sufficient standalone.
-    { level: 'strict',   id: 'force-push',              regex: /\bgit\s+push\b.*(?:--force(?!-with-lease)|-f)\b/, reason: 'Force-pushing is not allowed' },
+    // STRICT - force-push is normally handled by block-dangerous-commands.js.
+    // Only enforced here at 'strict' so git-safety is self-sufficient standalone.
+    { level: 'strict', id: 'force-push',              regex: /\bgit\s+push\b.*(?:--force(?!-with-lease)|-f)\b/, reason: 'Force-pushing is not allowed' },
 
-    // Block pushing directly to a protected branch by name (not covered by the sibling hook)
-    { level: 'standard', id: 'push-main',               regex: /\bgit\s+push\b.*\bmain\b/,                        reason: 'Pushing to main is not allowed' },
-    { level: 'standard', id: 'push-master',             regex: /\bgit\s+push\b.*\bmaster\b/,                      reason: 'Pushing to master is not allowed' },
+    // HIGH - complementary coverage the sibling hook does not provide
+
+    // Block pushing directly to a protected branch by name
+    { level: 'high', id: 'push-main',                 regex: /\bgit\s+push\b.*\bmain\b/,                        reason: 'Pushing to main is not allowed' },
+    { level: 'high', id: 'push-master',               regex: /\bgit\s+push\b.*\bmaster\b/,                      reason: 'Pushing to master is not allowed' },
 
     // Block deleting protected branches locally
-    { level: 'standard', id: 'branch-delete-protected', regex: /\bgit\s+branch\s+.*(?:-[dD]|--delete)\s+(?:main|master)\b/, reason: 'Deleting a protected branch is not allowed' },
+    { level: 'high', id: 'branch-delete-protected',   regex: /\bgit\s+branch\s+.*(?:-[dD]|--delete)\s+(?:main|master)\b/, reason: 'Deleting a protected branch is not allowed' },
 
     // Block direct changes when on a protected branch
-    { level: 'standard', id: 'commit-on-protected',     regex: /\bgit\s+commit\b/,                                reason: 'Committing directly on {branch} is not allowed', branchOnly: true },
-    { level: 'standard', id: 'merge-on-protected',      regex: /\bgit\s+merge\b/,                                 reason: 'Merging into {branch} is not allowed', branchOnly: true },
-    { level: 'standard', id: 'rebase-on-protected',     regex: /\bgit\s+rebase\b/,                                reason: 'Rebasing {branch} is not allowed', branchOnly: true },
-    { level: 'standard', id: 'reset-on-protected',      regex: /\bgit\s+reset\b/,                                 reason: 'Resetting {branch} is not allowed', branchOnly: true },
-    { level: 'standard', id: 'push-on-protected',       regex: /\bgit\s+push\b/,                                  reason: 'Pushing from {branch} is not allowed', branchOnly: true },
+    { level: 'high', id: 'commit-on-protected',       regex: /\bgit\s+commit\b/,                                reason: 'Committing directly on {branch} is not allowed', branchOnly: true },
+    { level: 'high', id: 'merge-on-protected',        regex: /\bgit\s+merge\b/,                                 reason: 'Merging into {branch} is not allowed', branchOnly: true },
+    { level: 'high', id: 'rebase-on-protected',       regex: /\bgit\s+rebase\b/,                                reason: 'Rebasing {branch} is not allowed', branchOnly: true },
+    { level: 'high', id: 'reset-on-protected',        regex: /\bgit\s+reset\b/,                                 reason: 'Resetting {branch} is not allowed', branchOnly: true },
+    { level: 'high', id: 'push-on-protected',         regex: /\bgit\s+push\b/,                                  reason: 'Pushing from {branch} is not allowed', branchOnly: true },
 
     // Block destructive gh CLI operations
-    { level: 'standard', id: 'gh-pr-merge',             regex: /\bgh\s+pr\s+merge\b/,                             reason: 'Merging PRs via gh CLI is not allowed' },
-    { level: 'standard', id: 'gh-pr-close',             regex: /\bgh\s+pr\s+close\b/,                             reason: 'Closing PRs via gh CLI is not allowed' },
-    { level: 'standard', id: 'gh-issue-close',          regex: /\bgh\s+issue\s+close\b/,                          reason: 'Closing issues via gh CLI is not allowed' },
-    { level: 'standard', id: 'gh-release-delete',       regex: /\bgh\s+release\s+delete\b/,                       reason: 'Deleting releases via gh CLI is not allowed' },
-    { level: 'standard', id: 'gh-repo-delete',          regex: /\bgh\s+repo\s+delete\b/,                          reason: 'Deleting repos via gh CLI is not allowed' },
+    { level: 'high', id: 'gh-pr-merge',               regex: /\bgh\s+pr\s+merge\b/,                             reason: 'Merging PRs via gh CLI is not allowed' },
+    { level: 'high', id: 'gh-pr-close',               regex: /\bgh\s+pr\s+close\b/,                             reason: 'Closing PRs via gh CLI is not allowed' },
+    { level: 'high', id: 'gh-issue-close',            regex: /\bgh\s+issue\s+close\b/,                          reason: 'Closing issues via gh CLI is not allowed' },
+    { level: 'high', id: 'gh-release-delete',         regex: /\bgh\s+release\s+delete\b/,                       reason: 'Deleting releases via gh CLI is not allowed' },
+    { level: 'high', id: 'gh-repo-delete',            regex: /\bgh\s+repo\s+delete\b/,                          reason: 'Deleting repos via gh CLI is not allowed' },
 ];
+
+const LEVELS = { critical: 1, high: 2, strict: 3 };
+const LOG_DIR = path.join(process.env.HOME, '.claude', 'hooks-logs');
 
 function log(data) {
     try {
@@ -82,9 +84,9 @@ function getCurrentBranch() {
 }
 
 function checkCommand(cmd, branch = null, safetyLevel = SAFETY_LEVEL) {
-    const threshold = LEVELS[safetyLevel] || LEVELS.standard;
+    const threshold = LEVELS[safetyLevel] || LEVELS.high;
     for (const p of PATTERNS) {
-        if ((LEVELS[p.level] || LEVELS.standard) > threshold) continue;
+        if (LEVELS[p.level] > threshold) continue;
         if (!p.regex.test(cmd)) continue;
 
         if (p.branchOnly) {
@@ -113,7 +115,7 @@ async function main() {
 
         if (result.blocked) {
             const p = result.pattern;
-            log({ level: 'BLOCKED', id: p.id, tier: p.level, cmd, session_id, cwd, permission_mode });
+            log({ level: 'BLOCKED', id: p.id, priority: p.level, cmd, session_id, cwd, permission_mode });
             return console.log(JSON.stringify({
                 hookSpecificOutput: {
                     hookEventName: 'PreToolUse',

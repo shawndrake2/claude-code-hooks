@@ -32,9 +32,9 @@ function shouldAllow(cmd, branch = null, level = undefined) {
   assert.strictEqual(result.blocked, false, `Expected ALLOWED but was BLOCKED by '${result.pattern?.id}': ${cmd}`);
 }
 
-function runHook(command, env = {}) {
+function runHook(command) {
   return new Promise((resolve, reject) => {
-    const child = spawn('node', [SCRIPT_PATH], { env: { ...process.env, ...env } });
+    const child = spawn('node', [SCRIPT_PATH]);
     let stdout = '';
     let stderr = '';
 
@@ -69,14 +69,14 @@ function runHook(command, env = {}) {
 describe('Unit: checkCommand()', () => {
 
   // ── Force push ─────────────────────────────────────────────────────────
-  // At the default 'standard' level, plain force-push is delegated to
+  // At the default 'high' level, plain force-push is delegated to
   // block-dangerous-commands.js (no overlap). It is only blocked here at 'strict'.
 
   describe('Force push', () => {
-    it('allows plain force push at standard (delegated to sibling hook)', () => shouldAllow('git push --force origin feature', 'feature-branch'));
-    it('allows git push -f at standard (delegated to sibling hook)', () => shouldAllow('git push -f origin feature', 'feature-branch'));
-    it('still blocks force push to main at standard (via push-main)', () => shouldBlock('git push --force origin main', 'push-main'));
-    it('still blocks force push to master at standard (via push-master)', () => shouldBlock('git push --force origin master', 'push-master'));
+    it('allows plain force push at high (delegated to sibling hook)', () => shouldAllow('git push --force origin feature', 'feature-branch'));
+    it('allows git push -f at high (delegated to sibling hook)', () => shouldAllow('git push -f origin feature', 'feature-branch'));
+    it('still blocks force push to main at high (via push-main)', () => shouldBlock('git push --force origin main', 'push-main'));
+    it('still blocks force push to master at high (via push-master)', () => shouldBlock('git push --force origin master', 'push-master'));
 
     it('blocks git push --force at strict', () => shouldBlock('git push --force origin feature', 'force-push', 'feature-branch', 'strict'));
     it('blocks git push -f at strict', () => shouldBlock('git push -f origin feature', 'force-push', 'feature-branch', 'strict'));
@@ -255,11 +255,12 @@ describe('Unit: checkCommand()', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('SAFETY_LEVEL tiers', () => {
-  it('standard delegates plain force-push to the sibling hook (allowed)', () => shouldAllow('git push --force origin feature', 'feature-branch', 'standard'));
+  it('high (default) delegates plain force-push to the sibling hook (allowed)', () => shouldAllow('git push --force origin feature', 'feature-branch', 'high'));
   it('strict blocks plain force-push (self-sufficient)', () => shouldBlock('git push --force origin feature', 'force-push', 'feature-branch', 'strict'));
-  it('standard still blocks the complementary coverage (gh pr merge)', () => shouldBlock('gh pr merge 1', 'gh-pr-merge', null, 'standard'));
+  it('critical applies no git-safety rules (gh pr merge allowed)', () => shouldAllow('gh pr merge 1', null, 'critical'));
+  it('high still blocks the complementary coverage (gh pr merge)', () => shouldBlock('gh pr merge 1', 'gh-pr-merge', null, 'high'));
   it('strict still blocks the complementary coverage (gh pr merge)', () => shouldBlock('gh pr merge 1', 'gh-pr-merge', null, 'strict'));
-  it('unknown level falls back to standard behavior', () => shouldAllow('git push --force origin feature', 'feature-branch', 'bogus'));
+  it('unknown level falls back to high (default) behavior', () => shouldAllow('git push --force origin feature', 'feature-branch', 'bogus'));
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -272,19 +273,6 @@ describe('Integration: stdin/stdout hook flow', () => {
     assert.strictEqual(code, 0);
     assert.strictEqual(output.hookSpecificOutput?.permissionDecision, 'deny');
     assert.ok(output.hookSpecificOutput?.permissionDecisionReason.includes('push-main'));
-  });
-
-  it('allows plain force push at default (standard) level', async () => {
-    const { code, output } = await runHook('git push --force origin feature');
-    assert.strictEqual(code, 0);
-    assert.deepStrictEqual(output, {});
-  });
-
-  it('returns deny for force push when GIT_SAFETY_LEVEL=strict', async () => {
-    const { code, output } = await runHook('git push --force origin feature', { GIT_SAFETY_LEVEL: 'strict' });
-    assert.strictEqual(code, 0);
-    assert.strictEqual(output.hookSpecificOutput?.permissionDecision, 'deny');
-    assert.ok(output.hookSpecificOutput?.permissionDecisionReason.includes('force-push'));
   });
 
   it('returns deny for gh pr merge', async () => {
