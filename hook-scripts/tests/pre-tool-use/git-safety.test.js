@@ -188,6 +188,53 @@ describe('Unit: checkCommand()', () => {
     it('blocks gh repo delete with --yes', () => shouldBlock('gh repo delete owner/repo --yes', 'gh-repo-delete'));
   });
 
+  describe('gh repo edit --default-branch (always blocked)', () => {
+    it('blocks changing the default branch', () => shouldBlock('gh repo edit --default-branch feature-x', 'gh-repo-default-branch'));
+    it('blocks it with a repo argument', () => shouldBlock('gh repo edit owner/repo --default-branch feature-x', 'gh-repo-default-branch'));
+    it('allows other repo edits', () => shouldAllow('gh repo edit --description "new"', 'feature-branch'));
+  });
+
+  // ── Git global options before the subcommand ───────────────────────────
+
+  describe('Git global options (do not bypass patterns)', () => {
+    it('blocks git -C <dir> push origin main', () => shouldBlock('git -C /repo push origin main', 'push-main'));
+    it('blocks git -c <k=v> push origin main', () => shouldBlock('git -c core.sshCommand=ssh push origin main', 'push-main'));
+    it('blocks git --git-dir=<dir> push origin main', () => shouldBlock('git --git-dir=/repo/.git push origin main', 'push-main'));
+    it('blocks git --no-pager push origin master', () => shouldBlock('git --no-pager push origin master', 'push-master'));
+    it('blocks git -C <dir> branch -D main', () => shouldBlock('git -C /repo branch -D main', 'branch-delete-protected'));
+    it('blocks git -C <dir> commit on main', () => shouldBlock('git -C /repo commit -m "fix"', 'commit-on-protected', 'main'));
+    it('blocks git -C <dir> push --force at strict', () => shouldBlock('git -C /repo push --force origin feature', 'force-push', 'feature-branch', 'strict'));
+    it('allows git -C <dir> push to a feature branch', () => shouldAllow('git -C /repo push origin feature-x', 'feature-branch'));
+    it('allows git -C <dir> status', () => shouldAllow('git -C /repo status', 'feature-branch'));
+  });
+
+  // ── Pushes that include every branch ───────────────────────────────────
+
+  describe('Push --all / --mirror (always blocked)', () => {
+    it('blocks git push --all', () => shouldBlock('git push --all origin', 'push-all-refs'));
+    it('blocks git push origin --all', () => shouldBlock('git push origin --all', 'push-all-refs'));
+    it('blocks git push --mirror', () => shouldBlock('git push --mirror origin', 'push-all-refs'));
+    it('allows git push --tags', () => shouldAllow('git push --tags origin', 'feature-branch'));
+    it('allows git fetch --all', () => shouldAllow('git fetch --all', 'feature-branch'));
+  });
+
+  // ── Merges and branch writes through the raw API ───────────────────────
+
+  describe('gh api merges and protected-branch writes (always blocked)', () => {
+    it('blocks REST PR merge', () => shouldBlock('gh api -X PUT repos/o/r/pulls/12/merge', 'gh-api-pr-merge'));
+    it('blocks REST PR merge with --method', () => shouldBlock('gh api --method PUT /repos/o/r/pulls/12/merge -f merge_method=squash', 'gh-api-pr-merge'));
+    it('blocks GraphQL mergePullRequest', () => shouldBlock('gh api graphql -f query="mutation{mergePullRequest(input:{pullRequestId:\\"x\\"}){clientMutationId}}"', 'gh-api-graphql-merge'));
+    it('blocks GraphQL enablePullRequestAutoMerge', () => shouldBlock('gh api graphql -f query="mutation{enablePullRequestAutoMerge(input:{pullRequestId:\\"x\\"}){clientMutationId}}"', 'gh-api-graphql-merge'));
+    it('blocks REST branch merge endpoint', () => shouldBlock('gh api -X POST repos/o/r/merges -f base=main -f head=feature', 'gh-api-branch-merge'));
+    it('blocks moving refs/heads/main', () => shouldBlock('gh api -X PATCH repos/o/r/git/refs/heads/main -f sha=abc', 'gh-api-protected-ref'));
+    it('blocks deleting refs/heads/master', () => shouldBlock('gh api --method DELETE repos/o/r/git/refs/heads/master', 'gh-api-protected-ref'));
+    it('blocks a contents write to main', () => shouldBlock('gh api -X PUT repos/o/r/contents/README.md -f message=x -f content=eA== -f branch=main', 'gh-api-protected-contents'));
+    it('allows reading refs/heads/main', () => shouldAllow('gh api repos/o/r/git/refs/heads/main', 'feature-branch'));
+    it('allows a contents write to a feature branch', () => shouldAllow('gh api -X PUT repos/o/r/contents/README.md -f branch=feature-x', 'feature-branch'));
+    it('allows reading a PR', () => shouldAllow('gh api repos/o/r/pulls/12', 'feature-branch'));
+    it('allows creating a PR', () => shouldAllow('gh api -X POST repos/o/r/pulls -f head=feature-x -f base=main', 'feature-branch'));
+  });
+
   // ── Safe commands ──────────────────────────────────────────────────────
 
   describe('Safe git commands (on feature branch)', () => {

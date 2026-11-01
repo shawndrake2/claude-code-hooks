@@ -7,7 +7,8 @@
  *   critical - no git-safety rules apply (defer entirely to block-dangerous-commands.js)
  *   high     - branch-aware guardrails (commit/merge/rebase/reset/push while on a
  *              protected branch), protected-branch deletion, direct pushes to
- *              main/master by name, and destructive gh CLI operations
+ *              main/master by name or via --all/--mirror, destructive gh CLI
+ *              operations, and merges/branch writes made through `gh api`
  *   strict   - + force-push, so this hook is self-sufficient standalone
  *
  * Composition with block-dangerous-commands.js:
@@ -35,26 +36,38 @@ const SAFETY_LEVEL = 'high';
 
 const PROTECTED_BRANCHES = ['main', 'master'];
 
+// `git` plus any global options before the subcommand (-C <dir>, -c <k=v>,
+// --git-dir=<dir>, --no-pager, ...). Without this, `git -C repo push origin main`
+// slips past every pattern that expects the subcommand right after `git`.
+const GIT_PREFIX = String.raw`\bgit(?:\s+(?:-[Cc]\s+\S+|--(?:git-dir|work-tree|namespace|exec-path|config-env)(?:=|\s+)\S+|--[\w-]+|-[pP]))*\s+`;
+const git = (rest) => new RegExp(GIT_PREFIX + rest);
+
+// `gh api` writes that land on a protected branch without going through `gh pr merge`.
+const GH_API_WRITE = String.raw`(?=.*(?:-X\s*|--method[\s=]+)(?:PATCH|PUT|POST|DELETE)\b)`;
+
 const PATTERNS = [
   // STRICT - force-push is normally handled by block-dangerous-commands.js.
   // Only enforced here at 'strict' so git-safety is self-sufficient standalone.
-  { level: 'strict', id: 'force-push',              regex: /\bgit\s+push\b.*(?:--force(?!-with-lease)|-f)\b/, reason: 'Force-pushing is not allowed' },
+  { level: 'strict', id: 'force-push',              regex: git(String.raw`push\b.*(?:--force(?!-with-lease)|-f)\b`), reason: 'Force-pushing is not allowed' },
 
   // HIGH - complementary coverage the sibling hook does not provide
 
   // Block pushing directly to a protected branch by name
-  { level: 'high', id: 'push-main',                 regex: /\bgit\s+push\b.*\bmain\b/,                        reason: 'Pushing to main is not allowed' },
-  { level: 'high', id: 'push-master',               regex: /\bgit\s+push\b.*\bmaster\b/,                      reason: 'Pushing to master is not allowed' },
+  { level: 'high', id: 'push-main',                 regex: git(String.raw`push\b.*\bmain\b`),                 reason: 'Pushing to main is not allowed' },
+  { level: 'high', id: 'push-master',               regex: git(String.raw`push\b.*\bmaster\b`),               reason: 'Pushing to master is not allowed' },
+
+  // Block pushes that include every branch, protected ones among them
+  { level: 'high', id: 'push-all-refs',             regex: git(String.raw`push\b.*\s--(?:all|mirror)\b`),     reason: 'Pushing all branches (--all/--mirror) includes protected branches' },
 
   // Block deleting protected branches locally
-  { level: 'high', id: 'branch-delete-protected',   regex: /\bgit\s+branch\s+.*(?:-[dD]|--delete)\s+(?:main|master)\b/, reason: 'Deleting a protected branch is not allowed' },
+  { level: 'high', id: 'branch-delete-protected',   regex: git(String.raw`branch\s+.*(?:-[dD]|--delete)\s+(?:main|master)\b`), reason: 'Deleting a protected branch is not allowed' },
 
   // Block direct changes when on a protected branch
-  { level: 'high', id: 'commit-on-protected',       regex: /\bgit\s+commit\b/,                                reason: 'Committing directly on {branch} is not allowed', branchOnly: true },
-  { level: 'high', id: 'merge-on-protected',        regex: /\bgit\s+merge\b/,                                 reason: 'Merging into {branch} is not allowed', branchOnly: true },
-  { level: 'high', id: 'rebase-on-protected',       regex: /\bgit\s+rebase\b/,                                reason: 'Rebasing {branch} is not allowed', branchOnly: true },
-  { level: 'high', id: 'reset-on-protected',        regex: /\bgit\s+reset\b/,                                 reason: 'Resetting {branch} is not allowed', branchOnly: true },
-  { level: 'high', id: 'push-on-protected',         regex: /\bgit\s+push\b/,                                  reason: 'Pushing from {branch} is not allowed', branchOnly: true },
+  { level: 'high', id: 'commit-on-protected',       regex: git(String.raw`commit\b`),                         reason: 'Committing directly on {branch} is not allowed', branchOnly: true },
+  { level: 'high', id: 'merge-on-protected',        regex: git(String.raw`merge\b`),                          reason: 'Merging into {branch} is not allowed', branchOnly: true },
+  { level: 'high', id: 'rebase-on-protected',       regex: git(String.raw`rebase\b`),                         reason: 'Rebasing {branch} is not allowed', branchOnly: true },
+  { level: 'high', id: 'reset-on-protected',        regex: git(String.raw`reset\b`),                          reason: 'Resetting {branch} is not allowed', branchOnly: true },
+  { level: 'high', id: 'push-on-protected',         regex: git(String.raw`push\b`),                           reason: 'Pushing from {branch} is not allowed', branchOnly: true },
 
   // Block destructive gh CLI operations
   { level: 'high', id: 'gh-pr-merge',               regex: /\bgh\s+pr\s+merge\b/,                             reason: 'Merging PRs via gh CLI is not allowed' },
@@ -62,6 +75,14 @@ const PATTERNS = [
   { level: 'high', id: 'gh-issue-close',            regex: /\bgh\s+issue\s+close\b/,                          reason: 'Closing issues via gh CLI is not allowed' },
   { level: 'high', id: 'gh-release-delete',         regex: /\bgh\s+release\s+delete\b/,                       reason: 'Deleting releases via gh CLI is not allowed' },
   { level: 'high', id: 'gh-repo-delete',            regex: /\bgh\s+repo\s+delete\b/,                          reason: 'Deleting repos via gh CLI is not allowed' },
+  { level: 'high', id: 'gh-repo-default-branch',    regex: /\bgh\s+repo\s+edit\b.*--default-branch\b/,        reason: 'Changing the default branch via gh CLI is not allowed' },
+
+  // Block the same outcomes reached through the raw API instead of `gh pr`
+  { level: 'high', id: 'gh-api-pr-merge',           regex: /\bgh\s+api\b.*\/pulls\/\d+\/merge\b/,             reason: 'Merging PRs via the GitHub API is not allowed' },
+  { level: 'high', id: 'gh-api-graphql-merge',      regex: /\bgh\s+api\b.*\b(?:mergePullRequest|enablePullRequestAutoMerge|mergeBranch)\b/, reason: 'Merging via the GitHub GraphQL API is not allowed' },
+  { level: 'high', id: 'gh-api-branch-merge',       regex: /\bgh\s+api\b.*\brepos\/[^\s/]+\/[^\s/]+\/merges\b/, reason: 'Merging branches via the GitHub API is not allowed' },
+  { level: 'high', id: 'gh-api-protected-ref',      regex: new RegExp(String.raw`\bgh\s+api\b${GH_API_WRITE}.*\bgit\/refs\/heads\/(?:main|master)\b`), reason: 'Moving a protected branch via the GitHub API is not allowed' },
+  { level: 'high', id: 'gh-api-protected-contents', regex: /\bgh\s+api\b.*\/contents\/.*\bbranch=(?:main|master)\b/, reason: 'Committing to a protected branch via the GitHub API is not allowed' },
 ];
 
 const LEVELS = { critical: 1, high: 2, strict: 3 };
